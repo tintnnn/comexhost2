@@ -1,0 +1,122 @@
+<div class="content">
+  <main class="main" role="main">
+    <header class="page-header">
+      <p class="eyebrow">Teacher tools</p>
+      <h1>Documents</h1>
+      <p class="subtitle">Track every submission through Coordinator, Master, and Principal review. Click a row to open the file.</p>
+    </header>
+
+    <section class="summary" *ngIf="!loading() && !errorMessage() && rows.length > 0" aria-label="Document summary">
+      <div class="summary-card">
+        <span class="summary-label">Total</span>
+        <span class="summary-value">{{ totalCount }}</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">In review</span>
+        <span class="summary-value">{{ inReviewCount }}</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">For revision</span>
+        <span class="summary-value warn">{{ revisionCount }}</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Approved</span>
+        <span class="summary-value ok">{{ approvedCount }}</span>
+      </div>
+    </section>
+
+    <div class="card">
+      <div class="list-toolbar" *ngIf="!loading() && !errorMessage()">
+        <label class="sr-only" for="teacher-doc-search">Search documents</label>
+        <input
+          id="teacher-doc-search"
+          type="search"
+          name="teacherDocSearch"
+          class="search-input"
+          [(ngModel)]="searchDraft"
+          (keydown.enter)="applySearch()"
+          placeholder="Search ID, type, title, reviewer, or status"
+          autocomplete="off"
+        />
+        <button type="button" class="btn-search" (click)="applySearch()">Search</button>
+        <button type="button" class="btn-clear" *ngIf="appliedSearchNorm" (click)="clearSearch()">Clear</button>
+      </div>
+
+      <p class="muted-row" *ngIf="loading()">Loading documents…</p>
+      <p class="error-row" *ngIf="errorMessage() && !loading()">{{ errorMessage() }}</p>
+
+      <div class="table-wrap" role="region" aria-label="Documents table" *ngIf="!loading() && !errorMessage()">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Type</th>
+              <th>Title</th>
+              <th>Submitted</th>
+              <th>Coordinator</th>
+              <th>Master</th>
+              <th>Principal</th>
+              <th>Overall</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              *ngFor="let row of displayRows; trackBy: trackById"
+              class="row"
+              tabindex="0"
+              (click)="openDocument(row)"
+              (keydown)="onRowKeydown($event, row)"
+            >
+              <td class="mono">#{{ row.id }}</td>
+              <td>
+                <span
+                  class="doc-type"
+                  [class.doc-type-dlp]="row.documentType === 'dlp'"
+                  [class.doc-type-exam]="row.documentType === 'examination'"
+                  [class.doc-type-custom]="row.documentType === 'custom'"
+                >
+                  {{ row.documentTypeLabel }}
+                </span>
+              </td>
+              <td class="title-cell">
+                <span class="file-name" [title]="row.name">{{ row.name }}</span>
+                <span class="file-meta" *ngIf="row.revisionCount > 0">{{ row.revisionCount }} revision{{ row.revisionCount === 1 ? '' : 's' }}</span>
+              </td>
+              <td>
+                <span class="submitter">{{ row.submittedBy }}</span>
+                <span class="file-meta">{{ row.submittedOn | date: 'mediumDate' }}</span>
+              </td>
+              <td>
+                <div class="stage-cell">
+                  <span class="status" [ngClass]="statusClass(row.coordStatus)">{{ statusLabel(row.coordStatus) }}</span>
+                  <span class="reviewer">{{ reviewerLabel(row.coordChecked, row.coordStatus) }}</span>
+                </div>
+              </td>
+              <td>
+                <div class="stage-cell">
+                  <span class="status" [ngClass]="statusClass(row.step2Status)">{{ statusLabel(row.step2Status) }}</span>
+                  <span class="reviewer">{{ reviewerLabel(row.step2Checked, row.step2Status) }}</span>
+                </div>
+              </td>
+              <td>
+                <div class="stage-cell">
+                  <span class="status" [ngClass]="statusClass(row.step3Status)">{{ statusLabel(row.step3Status) }}</span>
+                  <span class="reviewer">{{ reviewerLabel(row.step3Checked, row.step3Status) }}</span>
+                </div>
+              </td>
+              <td>
+                <span class="status overall" [ngClass]="row.overallTone">{{ row.overallLabel }}</span>
+              </td>
+            </tr>
+            <tr *ngIf="rows.length === 0">
+              <td colspan="8" class="muted-row">You haven't submitted any documents yet.</td>
+            </tr>
+            <tr *ngIf="rows.length > 0 && displayRows.length === 0">
+              <td colspan="8" class="muted-row">No documents match your search.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>

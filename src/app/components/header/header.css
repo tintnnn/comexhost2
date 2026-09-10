@@ -1,0 +1,29 @@
+.app-header {
+  background: #ffffff;
+  border-bottom: 1px solid rgba(76, 161, 163, 0.08);
+  box-shadow: 0 2px 12px rgba(76, 161, 163, 0.08);
+  color: #2c3e50;
+  flex-shrink: 0;
+  gap: 8px;
+  min-height: 56px;
+  padding-left: max(8px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.menu-toggle {
+  flex-shrink: 0;
+}
+
+.header-title {
+  color: #3a8c8e;
+  font-family: 'Poppins', sans-serif;
+  font-size: clamp(0.95rem, 2.5vw, 1.125rem);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

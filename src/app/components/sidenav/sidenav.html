@@ -1,0 +1,66 @@
+<div *ngIf="shouldRun; else noSidenav">
+  <mat-sidenav-container class="sidenav-container">
+    <mat-sidenav
+      #sidenav
+      class="sidenav"
+      [mode]="drawerMode"
+      [(opened)]="opened"
+      [fixedInViewport]="fixedInViewport"
+      [fixedTopGap]="fixedTopGap"
+      [fixedBottomGap]="fixedBottomGap"
+      [disableClose]="!isMobileView"
+    >
+      <div class="sidenav-content">
+        <div class="nav-header">
+          <div class="brand">
+            <img src="/image/ilalim-logo.png" alt="Ilalim Elementary School logo" class="logo-image" />
+          </div>
+        </div>
+
+        <nav class="nav-links" aria-label="Main">
+          <a
+            *ngFor="let item of navLinks"
+            [routerLink]="item.route"
+            routerLinkActive="active-link"
+            [routerLinkActiveOptions]="item.route === '/profile' ? { exact: true } : { exact: false }"
+            class="nav-item"
+          >
+            <mat-icon fontSet="material-icons-outlined" aria-hidden="true">{{ item.icon }}</mat-icon>
+            <span class="nav-label">{{ item.label }}</span>
+            <span
+              *ngIf="badgeFor(item) > 0"
+              class="nav-badge"
+              [attr.title]="badgeTitle(item)"
+              [attr.aria-label]="badgeTitle(item)"
+            >
+              {{ badgeFor(item) > 99 ? '99+' : badgeFor(item) }}
+            </span>
+          </a>
+        </nav>
+
+        <div class="logout-block">
+          <div class="logout-divider" role="separator"></div>
+          <button type="button" class="nav-item logout-item" (click)="logout()">
+            <mat-icon fontSet="material-icons-outlined" aria-hidden="true">logout</mat-icon>
+            <span class="nav-label">Logout</span>
+          </button>
+        </div>
+      </div>
+    </mat-sidenav>
+
+    <mat-sidenav-content class="sidenav-main">
+      <app-header
+        [sectionLabel]="sectionLabel"
+        [menuOpen]="opened"
+        (menuClick)="toggleSidenav()"
+      ></app-header>
+      <div class="content-container">
+        <router-outlet></router-outlet>
+      </div>
+    </mat-sidenav-content>
+  </mat-sidenav-container>
+</div>
+
+<ng-template #noSidenav>
+  <router-outlet></router-outlet>
+</ng-template>

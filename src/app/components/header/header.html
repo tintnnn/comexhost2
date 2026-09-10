@@ -1,0 +1,14 @@
+<mat-toolbar class="app-header">
+  <button
+    type="button"
+    mat-icon-button
+    class="menu-toggle"
+    [attr.aria-label]="menuOpen ? 'Close navigation menu' : 'Open navigation menu'"
+    [attr.aria-expanded]="menuOpen"
+    (click)="menuClick.emit()"
+  >
+    <mat-icon fontSet="material-icons-outlined">{{ menuOpen ? 'menu_open' : 'menu' }}</mat-icon>
+  </button>
+
+  <span class="header-title">{{ sectionLabel }} Portal</span>
+</mat-toolbar>

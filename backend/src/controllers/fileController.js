@@ -1,0 +1,578 @@
+'use strict';
+
+const crypto = require('crypto');
+const { pool } = require('../config/db');
+const supabase = require('../config/supabase');
+const env = require('../config/env');
+const HttpError = require('../utils/httpError');
+const { ROLES, roleName } = require('../utils/roles');
+const { STATUS } = require('../utils/status');
+const { parseAndNormalizeCustomStops } = require('../utils/customStops');
+const {
+  requireString,
+  optionalString,
+  requireId,
+} = require('../utils/validate');
+const logger = require('../utils/logger');
+
+/**
+ * Returns a SQL fragment + params describing which files the given role
+ * is allowed to see. Enforced at the DB query level so a misbehaving
+ * frontend cannot escalate visibility.
+ *
+ *   Teacher (1)     -> only files they uploaded
+ *   Coordinator (2) -> files routed at level >= 2
+ *   Master (3)      -> files routed at level >= 3
+ *   Admin (4)       -> all files
+ */
+function visibilityClause(user, startIndex = 1) {
+  switch (Number(user.role_level)) {
+    case ROLES.TEACHER:
+      return { sql: `f.uploaded_by = $${startIndex}`, params: [user.id] };
+    case ROLES.COORDINATOR:
+      // Coordinators see all documents that have reached their level or beyond.
+      // They can VIEW DLP documents (read-only) but cannot act on them since
+      // canActOnFile enforces current_level === role_level.
+      return { sql: `f.current_level >= $${startIndex}`, params: [ROLES.COORDINATOR] };
+    case ROLES.MASTER:
+      return { sql: `f.current_level >= $${startIndex}`, params: [ROLES.MASTER] };
+    case ROLES.ADMIN:
+      return { sql: '1=1', params: [] };
+    default:
+      return { sql: '1=0', params: [] };
+  }
+}
+
+function shapeFile(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    original_name: row.original_name,
+    mime_type: row.mime_type,
+    size_bytes: Number(row.size_bytes),
+    current_level: row.current_level,
+    current_role: roleName(row.current_level),
+    status: row.status,
+    document_type: row.document_type,
+    more_details: row.more_details,
+    custom_type_label: row.custom_type_label,
+    custom_stops: row.custom_stops,
+    uploaded_by: {
+      id: row.uploaded_by,
+      name: row.uploader_name,
+      email: row.uploader_email,
+    },
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+const FILE_SELECT = `
+  SELECT f.id, f.title, f.description, f.original_name, f.stored_name,
+         f.mime_type, f.size_bytes, f.current_level, f.status,
+         f.document_type, f.more_details, f.custom_type_label, f.custom_stops,
+         f.uploaded_by, f.created_at, f.updated_at,
+         u.name  AS uploader_name,
+         u.email AS uploader_email
+    FROM files f
+    JOIN users u ON u.id = f.uploaded_by
+`;
+
+/**
+ * POST /api/files (Teacher only) - multipart/form-data
+ * fields: title (string, required), description (string, optional), file (PDF)
+ */
+async function uploadFile(req, res, next) {
+  try {
+    if (!req.file || !req.file.buffer) throw new HttpError(400, 'PDF file is required');
+
+    let title;
+    let description;
+    let documentType;
+    let moreDetails;
+    let customTypeLabel;
+    let customStops = null;
+
+    try {
+      title = requireString(req.body && req.body.title, 'title', { min: 2, max: 255 });
+      description = optionalString(req.body && req.body.description, 'description', { max: 4000 });
+      documentType = req.body.document_type || 'dlp';
+      moreDetails = optionalString(req.body && req.body.more_details, 'more_details', { max: 4000 });
+      customTypeLabel = optionalString(req.body && req.body.custom_type_label, 'custom_type_label', { max: 255 });
+
+      // If a custom type label is set, enforce document_type = 'custom'
+      // and properly validate custom_stops using the shared utility.
+      if (customTypeLabel && customTypeLabel.trim()) {
+        documentType = 'custom';
+        const stops = parseAndNormalizeCustomStops(req.body);
+        customStops = JSON.stringify(stops);
+      } else if (req.body.custom_stops) {
+        // No custom label but stops sent: still parse and validate
+        try {
+          const arr = JSON.parse(req.body.custom_stops);
+          if (Array.isArray(arr)) customStops = JSON.stringify(arr);
+        } catch (e) {}
+      }
+    } catch (e) {
+      throw e;
+    }
+
+    let initialLevel = ROLES.MASTER; // DLP defaults to Master
+    if (documentType === 'examination') {
+      initialLevel = ROLES.COORDINATOR; // Exam starts at Coordinator
+    } else if (documentType === 'custom') {
+      if (customStops) {
+        const arr = JSON.parse(customStops);
+        if (arr.length > 0) initialLevel = arr[0];
+      }
+    }
+
+    const conn = await pool.getConnection();
+    let storedName = '';
+
+    try {
+      await conn.beginTransaction();
+
+      const [existing] = await conn.query(
+        'SELECT id FROM files WHERE uploaded_by = $1 AND title = $2 AND status NOT IN ($3, $4)',
+        [req.user.id, title, STATUS.FINALIZED, STATUS.RETURNED]
+      );
+      
+      if (existing.length > 0) {
+        throw new HttpError(409, 'You already have an active document with this title. Please use the Reupload feature inside the document details to update it.');
+      }
+
+      const storedRandom = crypto.randomBytes(4).toString('hex');
+      storedName = `${Date.now()}_${storedRandom}.pdf`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(env.supabase.bucket)
+        .upload(storedName, req.file.buffer, {
+          contentType: 'application/pdf',
+        });
+
+      if (uploadError) {
+        logger.error('supabase.upload.error', uploadError);
+        throw new HttpError(500, 'Failed to upload file to storage');
+      }
+
+      const [result] = await conn.query(
+        `INSERT INTO files
+          (uploaded_by, title, description, original_name, stored_name,
+           mime_type, size_bytes, current_level, status, document_type, more_details, custom_type_label, custom_stops)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+        [
+          req.user.id,
+          title,
+          description,
+          req.file.originalname.slice(0, 255),
+          storedName,
+          'application/pdf',
+          req.file.size,
+          initialLevel,
+          STATUS.UPLOADED,
+          documentType,
+          moreDetails,
+          customTypeLabel,
+          customStops,
+        ]
+      );
+
+      const fileId = result[0].id;
+
+      await conn.commit();
+
+      const [rows] = await pool.query(
+        `${FILE_SELECT} WHERE f.id = $1`,
+        [fileId]
+      );
+
+      logger.info('files.upload', {
+        reqId: req.id,
+        actor: req.user.id,
+        fileId: fileId,
+        size: req.file.size,
+      });
+
+      res.status(201).json({ file: shapeFile(rows[0]) });
+    } catch (e) {
+      await conn.rollback();
+      // Clean up Supabase file if DB insert fails
+      if (storedName) {
+        await supabase.storage.from(env.supabase.bucket).remove([storedName]);
+      }
+      throw e;
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/files
+ * Optional filters: ?status=&current_level=&mine=1
+ */
+async function listFiles(req, res, next) {
+  try {
+    const where = [];
+    const params = [];
+
+    const vis = visibilityClause(req.user, params.length + 1);
+    where.push(vis.sql);
+    params.push(...vis.params);
+
+    if (req.query.status) {
+      const allowed = Object.values(STATUS);
+      const status = String(req.query.status);
+      if (!allowed.includes(status)) {
+        throw new HttpError(400, 'Invalid status filter');
+      }
+      params.push(status);
+      where.push(`f.status = $${params.length}`);
+    }
+    if (req.query.current_level) {
+      const lvl = Number(req.query.current_level);
+      if (![1, 2, 3, 4].includes(lvl)) {
+        throw new HttpError(400, 'Invalid current_level filter');
+      }
+      params.push(lvl);
+      where.push(`f.current_level = $${params.length}`);
+    }
+    if (req.query.mine === '1') {
+      params.push(req.user.id);
+      where.push(`f.uploaded_by = $${params.length}`);
+    }
+    // ?history=1 returns files that have already moved past the
+    // requesting reviewer's stage, OR are finalized. Used by the
+    // Coordinator/Master "History" tab. Teachers and Admin get the
+    // unfiltered list because they don't have a "stage" of their own.
+    if (req.query.history === '1') {
+      const lvl = Number(req.user.role_level);
+      if (lvl === ROLES.COORDINATOR || lvl === ROLES.MASTER) {
+        params.push(lvl, STATUS.FINALIZED);
+        where.push(`(f.current_level > $${params.length - 1} OR f.status = $${params.length})`);
+      }
+    }
+
+    const sql = `${FILE_SELECT}
+      WHERE ${where.join(' AND ')}
+      ORDER BY f.updated_at DESC, f.id DESC
+      LIMIT 500`;
+    const [rows] = await pool.query(sql, params);
+
+    res.json({ files: rows.map(shapeFile) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Loads a file row and verifies the requesting user can view it.
+ * Throws 404 if not found, 403 if not visible.
+ */
+async function loadVisibleFile(user, fileId) {
+  const [rows] = await pool.query(`${FILE_SELECT} WHERE f.id = $1`, [
+    fileId,
+  ]);
+  const row = rows[0];
+  if (!row) throw new HttpError(404, 'File not found');
+
+  const level = Number(user.role_level);
+  if (level === ROLES.TEACHER && row.uploaded_by !== user.id) {
+    throw new HttpError(403, 'Forbidden');
+  }
+  if (level === ROLES.COORDINATOR && row.current_level < ROLES.COORDINATOR) {
+    throw new HttpError(403, 'Forbidden');
+  }
+  if (level === ROLES.MASTER && row.current_level < ROLES.MASTER) {
+    throw new HttpError(403, 'Forbidden');
+  }
+  return row;
+}
+
+/**
+ * GET /api/files/:id - returns metadata + comments timeline.
+ */
+async function getFile(req, res, next) {
+  try {
+    const id = requireId(req.params.id);
+    const row = await loadVisibleFile(req.user, id);
+
+    const [comments] = await pool.query(
+      `SELECT c.id, c.file_id, c.user_id, c.role_level, c.action, c.body,
+              c.resolved_at, c.resolved_by, c.created_at,
+              u.name  AS user_name,
+              u.email AS user_email,
+              ru.id   AS resolver_id,
+              ru.name AS resolver_name
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+         LEFT JOIN users ru ON ru.id = c.resolved_by
+        WHERE c.file_id = $1
+        ORDER BY c.created_at ASC, c.id ASC`,
+      [id]
+    );
+
+    res.json({
+      file: shapeFile(row),
+      comments: comments.map((c) => ({
+        id: c.id,
+        file_id: c.file_id,
+        action: c.action,
+        body: c.body,
+        role_level: c.role_level,
+        role: roleName(c.role_level),
+        user: { id: c.user_id, name: c.user_name, email: c.user_email },
+        resolved_at: c.resolved_at,
+        resolved_by: c.resolver_id
+          ? { id: c.resolver_id, name: c.resolver_name }
+          : null,
+        created_at: c.created_at,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/files/:id/download - streams the stored PDF.
+ *
+ * Fetches the file from Supabase Storage and streams it back.
+ */
+async function downloadFile(req, res, next) {
+  try {
+    const id = requireId(req.params.id);
+    const row = await loadVisibleFile(req.user, id);
+
+    const { data, error } = await supabase.storage
+      .from(env.supabase.bucket)
+      .download(row.stored_name);
+
+    if (error || !data) {
+      logger.error('supabase.download.error', error);
+      // Auto-cleanup: if the user manually deleted the file from Supabase Storage,
+      // we remove the orphaned database record so it disappears from the frontend.
+      await pool.query('DELETE FROM files WHERE id = $1', [id]);
+      throw new HttpError(410, 'Stored file is missing or cannot be accessed. The broken record has been removed.');
+    }
+
+    const safeName = encodeURIComponent(row.original_name).slice(0, 240);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    
+    // Read the blob into a buffer and send
+    const arrayBuffer = await data.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    res.send(buffer);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/files/:id/reupload (Teacher only) - multipart/form-data
+ * field: file (PDF)
+ *
+ * Replaces the stored PDF for a file the teacher already owns, while
+ * keeping the same row id (so the "transaction" stays the same). The
+ * workflow is reset back to the Coordinator stage so reviewers see
+ * the new version, and any open revision requests are auto-resolved
+ * (re-uploading IS the response to the revision). The previous PDF
+ * is deleted from storage.
+ */
+async function reuploadFile(req, res, next) {
+  try {
+    if (!req.file || !req.file.buffer) throw new HttpError(400, 'PDF file is required');
+
+    const id = requireId(req.params.id);
+
+    const conn = await pool.getConnection();
+    let oldStored = null;
+    let newStored = null;
+    
+    try {
+      await conn.beginTransaction();
+
+      const [rows] = await conn.query(
+        `SELECT id, uploaded_by, stored_name, status, document_type, custom_stops
+           FROM files WHERE id = $1 FOR UPDATE`,
+        [id]
+      );
+      const file = rows[0];
+      if (!file) {
+        throw new HttpError(404, 'File not found');
+      }
+      // Only the original uploader (Teacher) may re-upload, and only
+      // when there is at least one open revision request - re-upload
+      // is the teacher's response to a "Mark for revision" action.
+      if (Number(req.user.role_level) !== ROLES.TEACHER ||
+          file.uploaded_by !== req.user.id) {
+        throw new HttpError(403, 'You are not allowed to re-upload this file');
+      }
+      if (file.status === STATUS.FINALIZED) {
+        throw new HttpError(409, 'This document is already finalized');
+      }
+
+      const [openRevs] = await conn.query(
+        `SELECT COUNT(*) AS n
+           FROM comments
+          WHERE file_id = $1
+            AND action = 'revision'
+            AND resolved_at IS NULL`,
+        [file.id]
+      );
+      if (Number(openRevs[0].n) === 0) {
+        throw new HttpError(
+          409,
+          'Re-upload is only allowed when a reviewer has marked the document for revision.'
+        );
+      }
+
+      // ── Optional metadata update ──────────────────────────────────────
+      // Preset (document_type, custom_type_label, custom_stops) is ALWAYS
+      // taken from the existing DB row — the teacher cannot change the
+      // workflow type during a reupload. Only description and more_details
+      // may be updated.
+      let newDescription = undefined; // undefined = "no change"
+      let newMoreDetails = undefined;
+
+      if (req.body && 'description' in req.body) {
+        newDescription = optionalString(req.body.description, 'description', { max: 4000 });
+      }
+
+      if (req.body && 'more_details' in req.body) {
+        newMoreDetails = optionalString(req.body.more_details, 'more_details', { max: 4000 });
+      }
+
+      // Compute resetLevel from the EXISTING document_type in the DB.
+      const existingCustomStops = typeof file.custom_stops === 'string'
+        ? file.custom_stops
+        : Array.isArray(file.custom_stops)
+          ? JSON.stringify(file.custom_stops)
+          : null;
+
+      let resetLevel = ROLES.MASTER; // DLP: starts at Master
+      if (file.document_type === 'examination') {
+        resetLevel = ROLES.COORDINATOR;
+      } else if (file.document_type === 'custom' && existingCustomStops) {
+        try {
+          const stops = JSON.parse(existingCustomStops);
+          if (Array.isArray(stops) && stops.length > 0) resetLevel = stops[0];
+        } catch (_) { /* keep default */ }
+      }
+
+      oldStored = file.stored_name;
+
+      const random = crypto.randomBytes(16).toString('hex');
+      newStored = `${Date.now()}_${random}.pdf`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(env.supabase.bucket)
+        .upload(newStored, req.file.buffer, {
+          contentType: 'application/pdf',
+        });
+
+      if (uploadError) {
+        logger.error('supabase.reupload.error', uploadError);
+        throw new HttpError(500, 'Failed to upload new file to storage');
+      }
+
+      // Build the UPDATE statement — preset columns are never changed on
+      // reupload; only the PDF-related columns, level, status, and the
+      // optional description/notes are updated.
+      const setClauses = [
+        'original_name = $1',
+        'stored_name   = $2',
+        "mime_type     = 'application/pdf'",
+        'size_bytes    = $3',
+        'current_level = $4',
+        'status        = $5',
+      ];
+      const updateParams = [
+        req.file.originalname.slice(0, 255),
+        newStored,
+        req.file.size,
+        resetLevel,
+        STATUS.UPLOADED,
+      ];
+
+      if (newDescription !== undefined) {
+        updateParams.push(newDescription);
+        setClauses.push(`description = $${updateParams.length}`);
+      }
+      if (newMoreDetails !== undefined) {
+        updateParams.push(newMoreDetails);
+        setClauses.push(`more_details = $${updateParams.length}`);
+      }
+
+      updateParams.push(file.id);
+      const whereParam = `$${updateParams.length}`;
+
+      await conn.query(
+        `UPDATE files SET ${setClauses.join(', ')} WHERE id = ${whereParam}`,
+        updateParams
+      );
+
+      await conn.query(
+        `INSERT INTO comments (file_id, user_id, role_level, action, body)
+         VALUES ($1, $2, $3, 'comment', $4)`,
+        [
+          file.id,
+          req.user.id,
+          ROLES.TEACHER,
+          `Teacher re-uploaded a revised version (${req.file.originalname.slice(0, 200)}).`,
+        ]
+      );
+
+      await conn.commit();
+
+      // Best-effort: drop the previous PDF from storage now that the row
+      // points at the new file. Failure here is non-fatal.
+      if (oldStored) {
+        await supabase.storage.from(env.supabase.bucket).remove([oldStored]);
+      }
+
+      const [updated] = await pool.query(
+        `${FILE_SELECT} WHERE f.id = $1`,
+        [file.id]
+      );
+
+      logger.info('files.reupload', {
+        reqId: req.id,
+        actor: req.user.id,
+        fileId: file.id,
+        size: req.file.size,
+      });
+
+      res.json({ file: shapeFile(updated[0]) });
+    } catch (e) {
+      await conn.rollback();
+      // If the new upload was saved to Supabase but the DB transaction
+      // failed, drop the orphan file so storage doesn't leak.
+      if (newStored) {
+        await supabase.storage.from('files').remove([newStored]);
+      }
+      throw e;
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  uploadFile,
+  listFiles,
+  getFile,
+  downloadFile,
+  reuploadFile,
+  loadVisibleFile,
+  shapeFile,
+};
