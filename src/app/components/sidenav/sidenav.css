@@ -256,14 +256,6 @@
   color: #a33b3b;
 }
 
-::ng-deep .logout-dialog .mat-mdc-dialog-container {
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-::ng-deep .logout-dialog .mat-mdc-dialog-surface {
-  padding: 0;
-}
 
 @media (max-width: 1024px) {
   .sidenav {

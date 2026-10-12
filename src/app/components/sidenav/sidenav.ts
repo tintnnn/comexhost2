@@ -224,18 +224,29 @@ export class Sidenav implements OnInit, OnDestroy {
   }
 
   logout(): void {
-    const dialogRef = this.dialog.open(LogoutConfirmationDialog, {
-      width: '300px',
-      panelClass: 'logout-dialog',
-    });
+    const openDialog = () =>
+      this.dialog.open(LogoutConfirmationDialog, {
+        width: '380px',
+        maxWidth: 'calc(100vw - 32px)',
+        autoFocus: 'first-tabbable',
+        panelClass: 'logout-dialog',
+        backdropClass: 'logout-dialog-backdrop',
+      });
 
-    dialogRef.afterClosed().subscribe((confirmed) => {
-      if (!confirmed) return;
-      // Wait for the backend to invalidate the JWT (token_version bump)
-      // before navigating, so this device cannot keep using the old token
-      // even for an instant. logout() always resolves successfully.
-      this.auth.logout().subscribe(() => {
-        this.router.navigate(['/login']);
+    const dialogRef$ =
+      this.isMobile && this.sidenav?.opened
+        ? this.sidenav.close().then(() => openDialog())
+        : Promise.resolve(openDialog());
+
+    void dialogRef$.then((dialogRef) => {
+      dialogRef.afterClosed().subscribe((confirmed) => {
+        if (!confirmed) return;
+        // Wait for the backend to invalidate the JWT (token_version bump)
+        // before navigating, so this device cannot keep using the old token
+        // even for an instant. logout() always resolves successfully.
+        this.auth.logout().subscribe(() => {
+          this.router.navigate(['/login']);
+        });
       });
     });
   }
@@ -275,62 +286,97 @@ export class Sidenav implements OnInit, OnDestroy {
 @Component({
   selector: 'logout-confirmation-dialog',
   template: `
-    <div class="logout-dialog-content">
-      <div class="logout-icon-container">
-        <mat-icon class="large-logout-icon">logout</mat-icon>
+    <div class="logout-dialog-card">
+      <div class="logout-dialog-icon" aria-hidden="true">
+        <mat-icon fontSet="material-icons-outlined">logout</mat-icon>
       </div>
-      <h2 mat-dialog-title>Confirm Logout</h2>
-      <mat-dialog-content>Are you sure you want to logout?</mat-dialog-content>
-      <mat-dialog-actions align="end">
-        <button mat-button [mat-dialog-close]="false">Cancel</button>
-        <button mat-raised-button color="warn" [mat-dialog-close]="true">Logout</button>
-      </mat-dialog-actions>
+      <h2 class="logout-dialog-title">Log out?</h2>
+      <p class="logout-dialog-copy">You’ll be signed out of this device. You can sign back in anytime.</p>
+      <div class="logout-dialog-actions">
+        <button type="button" class="logout-btn logout-btn-ghost" [mat-dialog-close]="false">Cancel</button>
+        <button type="button" class="logout-btn logout-btn-solid" [mat-dialog-close]="true">Log out</button>
+      </div>
     </div>
   `,
   styles: [
     `
-      .logout-dialog-content {
-        padding: 24px;
+      .logout-dialog-card {
+        padding: 28px 24px 22px;
         text-align: center;
       }
 
-      .logout-icon-container {
-        display: flex;
+      .logout-dialog-icon {
+        align-items: center;
+        background: rgba(58, 140, 142, 0.12);
+        border-radius: 16px;
+        color: #3a8c8e;
+        display: inline-flex;
+        height: 52px;
         justify-content: center;
         margin-bottom: 16px;
+        width: 52px;
       }
 
-      .large-logout-icon {
-        color: #f44336;
-        font-size: 64px;
-        height: 64px;
-        opacity: 0.9;
-        width: 64px;
+      .logout-dialog-icon mat-icon {
+        font-size: 26px;
+        height: 26px;
+        width: 26px;
       }
 
-      h2 {
-        color: #2c3e50;
-        font-size: 24px;
-        font-weight: 500;
-        margin: 0 0 16px;
+      .logout-dialog-title {
+        color: #1f2a2e;
+        font-size: 1.25rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        line-height: 1.3;
+        margin: 0 0 8px;
       }
 
-      mat-dialog-content {
-        color: #5a6268;
-        font-size: 16px;
-        margin-bottom: 24px;
+      .logout-dialog-copy {
+        color: #5b6b70;
+        font-size: 0.9rem;
+        line-height: 1.5;
+        margin: 0 0 22px;
       }
 
-      mat-dialog-actions {
-        gap: 12px;
-        justify-content: flex-end;
-        margin-bottom: 0;
-        padding: 8px 0 0;
+      .logout-dialog-actions {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .logout-btn {
+        border: 0;
+        border-radius: 12px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 0.92rem;
+        font-weight: 600;
+        height: 44px;
+        padding: 0 12px;
+      }
+
+      .logout-btn-ghost {
+        background: #eef3f4;
+        color: #3d4d52;
+      }
+
+      .logout-btn-ghost:hover {
+        background: #e4ebed;
+      }
+
+      .logout-btn-solid {
+        background: #3a8c8e;
+        color: #fff;
+      }
+
+      .logout-btn-solid:hover {
+        background: #32787a;
       }
     `,
   ],
   standalone: true,
-  imports: [MatDialogModule, MatButtonModule, MatIconModule],
+  imports: [MatDialogModule, MatIconModule],
 })
 export class LogoutConfirmationDialog {}
 

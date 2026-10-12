@@ -4,3 +4,4 @@ uploads/*
 !uploads/.gitkeep
 *.log
 .vercel
+.env*.local

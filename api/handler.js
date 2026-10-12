@@ -1,6 +1,9 @@
 'use strict';
 
-const BACKEND = 'https://backend-ten-dusky-71.vercel.app';
+// Your own backend URL. Set BACKEND_URL in the frontend Vercel project
+// (e.g. https://your-backend.vercel.app). Do not point this at an expired
+// or third-party deployment.
+const BACKEND = process.env.BACKEND_URL || '';
 
 function collectBody(req) {
   return new Promise((resolve, reject) => {
@@ -15,6 +18,18 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
+    return;
+  }
+
+  if (!BACKEND) {
+    res.statusCode = 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(
+      JSON.stringify({
+        error:
+          'BACKEND_URL is not set. Deploy the backend from /backend and set BACKEND_URL on this frontend project.',
+      })
+    );
     return;
   }
 
